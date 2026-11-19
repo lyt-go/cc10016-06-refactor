@@ -4,9 +4,15 @@
 """
 from __future__ import annotations
 
-from typing import Any
+import copy
+import threading
+from contextlib import contextmanager
+from typing import Any, Iterator
 
 from app.seed import SEED_ROWS
+
+# 跨模块落库表：由解析规则发布、字段抽取消费，不属于可浏览业务模块。
+INTERNAL_TABLES = {"field_template_batch", "parse_version_meta"}
 
 
 class Store:
@@ -14,6 +20,13 @@ class Store:
         self._tables: dict[str, list[dict[str, Any]]] = {
             name: [dict(row) for row in rows] for name, rows in SEED_ROWS.items()
         }
+        # 跨模块落库的字段抽取模板批次与解析版本元数据；随库初始化，
+        # 但保持为空，不影响既有模块的分页与导出结果。
+        self._tables.setdefault("field_template_batch", [])
+        self._tables.setdefault("parse_version_meta", [])
+        self._tx_lock = threading.RLock()
+        # 同一解析版本的并发重算锁：保证同一时刻只有一个批次在构建。
+        self._version_locks: dict[str, threading.RLock] = {}
         # 跨模块链路状态存储
         self._pipeline_states: dict[str, Any] = {
             "source_validation_cache": {},   # crawl_source 连接校验缓存
@@ -157,7 +170,8 @@ class Store:
                     break
 
     def module_names(self) -> list[str]:
-        return sorted(self._tables)
+        """对外暴露的业务模块名；内部落库表不参与模块概览统计。"""
+        return sorted(name for name in self._tables if name not in INTERNAL_TABLES)
 
     def rows(self, module: str) -> list[dict[str, Any]]:
         return self._tables.setdefault(module, [])
@@ -185,6 +199,40 @@ class Store:
 
     def pipeline_states(self) -> dict[str, Any]:
         return dict(self._pipeline_states)
+
+    # ------------------------------------------------------------------
+    # 事务与并发原语：字段抽取模板批次与解析版本元数据必须同一事务提交。
+    # ------------------------------------------------------------------
+    def version_lock(self, lock_key: str) -> threading.RLock:
+        """取得某个解析版本专属的重算锁（同版本重算串行化）。"""
+        with self._tx_lock:
+            lock = self._version_locks.get(lock_key)
+            if lock is None:
+                lock = threading.RLock()
+                self._version_locks[lock_key] = lock
+            return lock
+
+    @contextmanager
+    def transaction(self, *, snapshot_modules: list[str] | None = None) -> Iterator["Store"]:
+        """以快照+回滚实现的最小事务。
+
+        提交成功才保留写入；函数体抛异常则恢复到进入事务前的状态，
+        即「写入中断后保留上一份完整模板批次」。
+        """
+        with self._tx_lock:
+            saved_tables = {
+                name: copy.deepcopy(self._tables[name])
+                for name in (snapshot_modules or list(self._tables))
+                if name in self._tables
+            }
+            saved_states = copy.deepcopy(self._pipeline_states)
+            try:
+                yield self
+            except Exception:
+                for name, rows in saved_tables.items():
+                    self._tables[name] = rows
+                self._pipeline_states = saved_states
+                raise
 
     def add_relation(self, relation_type: str, source_module: str, source_id: int,
                      target_module: str, target_id: int, meta: dict[str, Any] | None = None) -> None:

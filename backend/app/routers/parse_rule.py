@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from app.schemas import ActionPayload, ActionResult, EntryPayload, PageResult
-from app.services.parse_rule import ParseRuleService
+from app.services.parse_rule import ParseRuleService, describe_batch_basis
 
 router = APIRouter(prefix="/api/parse_rule", tags=["解析规则"])
 
@@ -94,5 +94,53 @@ def run_action(entry_id: int, payload: ActionPayload) -> ActionResult:
 
 @router.post("/{entry_id}/generate_fields")
 def generate_field_extracts(entry_id: int) -> dict:
-    """基于解析规则生成字段抽取模板。"""
+    """基于解析规则生成字段抽取模板，并发布该规则版本的模板批次。"""
     return {"items": service.generate_field_extracts(entry_id)}
+
+
+@router.post("/{rule_code}/template-batch")
+def generate_template_batch(rule_code: str, payload: dict[str, object]) -> dict:
+    """按解析版本与页面样本重算字段抽取模板批次。
+
+    payload:
+      - rule_version: 解析规则版本号（必填）
+      - page_sample: 页面样本（必填）
+      - mode: 统一生成 / 历史复现 / 当前口径（默认统一生成）
+      - historical_version: 历史复现时的基准版本（可选）
+    """
+    rule_version = str(payload.get("rule_version") or "").strip()
+    page_sample = payload.get("page_sample")
+    if not rule_version or page_sample is None:
+        return {"ok": False, "message": "缺少必填参数：rule_version、page_sample"}
+    mode = str(payload.get("mode") or "统一生成")
+    result = service.generate_template_batch(
+        rule_code=rule_code,
+        rule_version=rule_version,
+        page_sample=str(page_sample),
+        mode=mode,
+        historical_version=(str(payload["historical_version"]) if payload.get("historical_version") else None),
+    )
+    if not result.get("ok"):
+        return {"ok": False, "message": result.get("error", "模板批次生成失败"), "batch": None}
+    batch = result["batch"]
+    return {
+        "ok": True,
+        "message": "字段抽取模板批次已发布",
+        "batch": batch,
+        "basis": describe_batch_basis(batch),
+    }
+
+
+@router.get("/{rule_code}/template-batch")
+def list_template_batches(rule_code: str, rule_version: str | None = Query(default=None)) -> dict:
+    """读取解析规则已发布的模板批次（含历史版本依据）。"""
+    batches = service.list_template_batches(rule_code, rule_version)
+    return {"items": batches, "total": len(batches)}
+
+
+@router.post("/{rule_code}/template-batch/{batch_id}/consume")
+def consume_template_batch(rule_code: str, batch_id: int, payload: dict[str, object]) -> dict:
+    """把解析规则发布的模板批次交给字段抽取消费。"""
+    page_sample = str(payload.get("page_sample") or "")
+    result = service.consume_template_batch(batch_id, page_sample)
+    return result

@@ -65,6 +65,18 @@ def export_entries(
         headers={"Content-Disposition": 'attachment; filename="field_extract.csv"'})
 
 
+@router.get("/batch/{batch_id}")
+def get_batch(batch_id: int) -> dict:
+    """读取解析规则发布的模板批次（字段抽取只消费，不解释选择器）。
+
+    必须声明在 /{entry_id} 之前。
+    """
+    batch = service.get_batch(batch_id)
+    if batch is None:
+        raise HTTPException(status_code=404, detail=f"模板批次 {batch_id} 不存在")
+    return batch
+
+
 @router.get("/{entry_id}", response_model=dict)
 def get_entry(entry_id: int) -> dict:
     """读取单条抽取模板明细；不存在时给出可读的错误说明。"""
@@ -97,3 +109,10 @@ def extract_fields(entry_id: int, payload: dict[str, object]) -> dict:
     """对给定HTML执行字段抽取。"""
     html = str(payload.get("html") or "")
     return service.extract_fields(entry_id, html)
+
+
+@router.post("/batch/{batch_id}/consume")
+def consume_batch(batch_id: int, payload: dict[str, object]) -> dict:
+    """消费一批模板数据，并按原规则版本登记输出类型。"""
+    page_sample = str(payload.get("page_sample") or "")
+    return service.consume_batch(batch_id, page_sample)

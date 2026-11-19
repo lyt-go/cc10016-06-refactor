@@ -75,5 +75,22 @@ npm run dev
 - 列表接口统一返回 `{ items, total, page, size }`，动作接口统一返回 `{ ok, message }`。
 - 状态流转只允许在 `app/services` 里改，路由层不做业务判断。
 
+## 解析规则与字段抽取的模板批次
+
+解析规则与字段抽取不再各自维护一套选择器判断：
+
+- 选择器校验与匹配统一走 `backend/app/services/selector_validation.py`，
+  历史规则的选择器语义与提示文案保持不变。
+- 解析规则通过 `POST /api/parse_rule/{规则族}/template-batch` 按「解析版本 + 页面样本」
+  整批产出字段抽取模板，写入跨模块落库表 `field_template_batch`，并把解析版本元数据
+  写入 `parse_version_meta`；二者在同一事务提交，写入中断会回滚并保留上一份完整批次。
+- 同一解析版本并发重算只会有一份批次处于「可消费」状态，其余标记为「已替换」。
+- 字段抽取只消费解析规则发布的批次（`POST /api/field_extract/batch/{批次ID}/consume`），
+  不再解释选择器，并按原规则版本登记输出类型。
+- 生成模式：
+  - `历史复现`：旧默认值、字段顺序原样保留，逐字段记录历史版本依据；
+  - `统一生成`：字段集合、输出类型与空值规则与历史等价，逐字段写入历史版本映射。
+  `GET /api/parse_rule/{规则族}/template-batch?rule_version=...` 可查看批次依据说明。
+
 领域：数据工程
 子方向：数据采集、爬虫与RPA
